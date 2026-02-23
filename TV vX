@@ -1,0 +1,731 @@
+import React, { useState, useMemo } from 'react';
+import Papa from 'papaparse';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+
+const S = {
+  root: { minHeight: '100vh', background: '#111', color: '#e5e5e5', fontFamily: '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif', fontSize: 13, lineHeight: 1.5 },
+  wrap: { maxWidth: 1080, margin: '0 auto', padding: '20px 16px' },
+  row: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  card: { background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: 4, padding: 12 },
+  btn: { background: '#222', border: '1px solid #333', borderRadius: 3, padding: '5px 12px', color: '#ccc', cursor: 'pointer', fontSize: 12 },
+  btnActive: { background: '#1a3a1a', border: '1px solid #22c55e', color: '#22c55e' },
+  btnDanger: { background: '#2a1a1a', border: '1px solid #555', color: '#f87171' },
+  input: { background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, padding: '5px 10px', color: '#e5e5e5', fontSize: 12, outline: 'none' },
+  select: { background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, padding: '5px 10px', color: '#e5e5e5', fontSize: 12, outline: 'none' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
+  th: { textAlign: 'left', padding: '8px 10px', borderBottom: '1px solid #333', color: '#888', fontWeight: 500 },
+  thR: { textAlign: 'right', padding: '8px 10px', borderBottom: '1px solid #333', color: '#888', fontWeight: 500 },
+  td: { padding: '6px 10px', borderBottom: '1px solid #1f1f1f' },
+  tdR: { padding: '6px 10px', borderBottom: '1px solid #1f1f1f', textAlign: 'right' },
+  green: { color: '#22c55e' },
+  red: { color: '#ef4444' },
+  dim: { color: '#666' },
+  mid: { color: '#999' },
+  label: { fontSize: 11, color: '#777', marginBottom: 2 },
+  big: { fontSize: 20, fontWeight: 600 },
+  hidden: { display: 'none' },
+};
+
+const fmt = (v) => (v >= 0 ? '' : '-') + '$' + Math.abs(v).toFixed(2);
+const fmtR = (v) => (v >= 0 ? '+' : '') + v.toFixed(2) + 'R';
+const pnlColor = (v) => v > 0 ? S.green : v < 0 ? S.red : S.mid;
+
+export default function TradingJournal() {
+  const [rawTrades, setRawTrades] = useState([]);      // individual executions
+  const [activeTab, setActiveTab] = useState('calendar');
+  const [error, setError] = useState('');
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [riskInput, setRiskInput] = useState('');
+  const [dateRisks, setDateRisks] = useState({});
+  const [uploadedDates, setUploadedDates] = useState([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+
+  const [dateMode, setDateMode] = useState('all');
+  const [singleDate, setSingleDate] = useState('');
+  const [rangeStart, setRangeStart] = useState('');
+  const [rangeEnd, setRangeEnd] = useState('');
+
+  const now = new Date();
+  const [calYear, setCalYear] = useState(now.getFullYear());
+  const [calMonth, setCalMonth] = useState(now.getMonth());
+  const [selectedDay, setSelectedDay] = useState(null);
+
+  const parsePrice = (val) => {
+    if (typeof val === 'number') return val;
+    return parseFloat(String(val).replace(/[$,]/g, '')) || 0;
+  };
+
+  const parseDateFromFilename = (filename) => {
+    const base = filename.replace(/\.csv$/i, '');
+    const numbers = base.match(/\d+/g);
+    if (!numbers || numbers.length < 3) return null;
+    const nums = numbers.slice(-3);
+    const month = parseInt(nums[0], 10);
+    const day = parseInt(nums[1], 10);
+    let year = parseInt(nums[2], 10);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    if (year < 100) year = 2000 + year;
+    const date = new Date(year, month - 1, day);
+    if (date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+    return {
+      date,
+      dateStr: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      sortKey: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    };
+  };
+
+  const handleFileUpload = (e) => { const f = Array.from(e.target.files || []); if (f.length) processFiles(f); e.target.value = ''; };
+
+  const processFiles = async (files) => {
+    const csvs = files.filter(f => f.name.toLowerCase().endsWith('.csv'));
+    if (!csvs.length) { setError('No CSV files found.'); return; }
+    setIsProcessing(true); setUploadProgress({ current: 0, total: csvs.length }); setError('');
+    let ok = 0, skip = 0; const errs = [];
+    for (let i = 0; i < csvs.length; i++) {
+      setUploadProgress({ current: i + 1, total: csvs.length });
+      const r = await processFile(csvs[i]);
+      if (r.success) ok++;
+      else if (r.skipped) skip++;
+      else errs.push(`${csvs[i].name}: ${r.error}`);
+    }
+    setIsProcessing(false);
+    if (errs.length) setError(`OK: ${ok}, Skip: ${skip}, Errors: ${errs.join('; ')}`);
+    else if (skip) setError(`Loaded ${ok} file(s). Skipped ${skip}.`);
+  };
+
+  const processFile = (file) => new Promise((resolve) => {
+    const di = parseDateFromFilename(file.name);
+    if (!di) { resolve({ success: false, error: `Bad filename "${file.name}"` }); return; }
+    if (uploadedDates.some(d => d.sortKey === di.sortKey)) { resolve({ success: false, skipped: true }); return; }
+    Papa.parse(file, {
+      header: true, skipEmptyLines: true,
+      complete: (results) => {
+        try {
+          const bs = {};
+          results.data.forEach(row => {
+            const sym = (row.Symbol || '').toUpperCase().trim();
+            const side = (row.Side || '').toUpperCase().trim();
+            const qty = parseFloat(row.Qty) || 0;
+            const price = parsePrice(row.Price);
+            const time = row.Time || '';
+            if (!sym || !side || qty === 0) return;
+            if (!bs[sym]) bs[sym] = { sells: [], buys: [] };
+            if (side === 'SS') bs[sym].sells.push({ qty, price, time });
+            else if (side === 'B') bs[sym].buys.push({ qty, price, time });
+          });
+          const ct = [];
+          Object.entries(bs).forEach(([sym, d]) => {
+            const sells = [...d.sells], buys = [...d.buys];
+            while (sells.length && buys.length) {
+              const s = sells.shift(), b = buys.shift(), q = Math.min(s.qty, b.qty);
+              ct.push({ id: `${di.sortKey}-${sym}-${ct.length}`, symbol: sym, entryPrice: s.price, exitPrice: b.price, qty: q, pnl: (s.price - b.price) * q, entryTime: s.time, exitTime: b.time, date: di.date, dateStr: di.dateStr, sortKey: di.sortKey });
+              if (s.qty > b.qty) sells.unshift({ ...s, qty: s.qty - b.qty });
+              else if (b.qty > s.qty) buys.unshift({ ...b, qty: b.qty - s.qty });
+            }
+          });
+          if (!ct.length) { resolve({ success: false, error: 'No matched trades' }); return; }
+          setRawTrades(prev => [...prev, ...ct].sort((a, b) => a.sortKey.localeCompare(b.sortKey)));
+          setUploadedDates(prev => [...prev, di].sort((a, b) => a.sortKey.localeCompare(b.sortKey)));
+          resolve({ success: true });
+        } catch (err) { resolve({ success: false, error: err.message }); }
+      },
+      error: (err) => { resolve({ success: false, error: err.message }); }
+    });
+  });
+
+  // ===== CORE: merge raw executions by symbol+date into single trades =====
+  const allTrades = useMemo(() => {
+    const map = {};
+    rawTrades.forEach(t => {
+      const key = `${t.sortKey}|${t.symbol}`;
+      if (!map[key]) {
+        map[key] = {
+          id: key, symbol: t.symbol, sortKey: t.sortKey, dateStr: t.dateStr, date: t.date,
+          pnl: 0, totalQty: 0, executions: 0,
+          entryValue: 0, exitValue: 0, // qty-weighted for avg price
+        };
+      }
+      map[key].pnl += t.pnl;
+      map[key].totalQty += t.qty;
+      map[key].executions++;
+      map[key].entryValue += t.entryPrice * t.qty;
+      map[key].exitValue += t.exitPrice * t.qty;
+    });
+    return Object.values(map).map(t => ({
+      ...t,
+      avgEntry: t.totalQty > 0 ? t.entryValue / t.totalQty : 0,
+      avgExit: t.totalQty > 0 ? t.exitValue / t.totalQty : 0,
+    })).sort((a, b) => a.sortKey.localeCompare(b.sortKey) || a.symbol.localeCompare(b.symbol));
+  }, [rawTrades]);
+
+  // Date-filtered consolidated trades
+  const trades = useMemo(() => {
+    if (dateMode === 'all') return allTrades;
+    if (dateMode === 'single' && singleDate) return allTrades.filter(t => t.sortKey === singleDate);
+    if (dateMode === 'range') {
+      return allTrades.filter(t => {
+        if (rangeStart && rangeEnd) return t.sortKey >= rangeStart && t.sortKey <= rangeEnd;
+        if (rangeStart) return t.sortKey >= rangeStart;
+        if (rangeEnd) return t.sortKey <= rangeEnd;
+        return true;
+      });
+    }
+    return allTrades;
+  }, [allTrades, dateMode, singleDate, rangeStart, rangeEnd]);
+
+  // Group by symbol (for overview stats)
+  const symbolSummary = useMemo(() => {
+    const bs = {};
+    trades.forEach(t => {
+      if (!bs[t.symbol]) bs[t.symbol] = { symbol: t.symbol, trades: 0, totalQty: 0, pnl: 0, wins: 0 };
+      bs[t.symbol].trades++;
+      bs[t.symbol].totalQty += t.totalQty;
+      bs[t.symbol].pnl += t.pnl;
+      if (t.pnl > 0) bs[t.symbol].wins++;
+    });
+    return Object.values(bs).map(s => ({
+      ...s, winRate: (s.wins / s.trades) * 100
+    })).sort((a, b) => b.pnl - a.pnl);
+  }, [trades]);
+
+  // Trades by date for calendar
+  const tradesByDate = useMemo(() => {
+    const m = {};
+    allTrades.forEach(t => { if (!m[t.sortKey]) m[t.sortKey] = []; m[t.sortKey].push(t); });
+    return m;
+  }, [allTrades]);
+
+  // Trades tab: chronological, most recent first
+  const tradesChronological = useMemo(() => {
+    return [...trades].sort((a, b) => b.sortKey.localeCompare(a.sortKey) || a.symbol.localeCompare(b.symbol));
+  }, [trades]);
+
+  // Calendar
+  const calMonthName = new Date(calYear, calMonth).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  const calGrid = useMemo(() => {
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+    const flat = [];
+    const firstDate = new Date(calYear, calMonth, 1);
+    let jsDay = firstDate.getDay();
+    const monBased = (jsDay + 6) % 7;
+    const pad = Math.min(monBased, 5);
+    for (let i = 0; i < pad; i++) flat.push(null);
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dow = new Date(calYear, calMonth, d).getDay();
+      if (dow === 0 || dow === 6) continue;
+      const sk = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const dayTrades = tradesByDate[sk] || [];
+      const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
+      const symbols = dayTrades.map(t => t.symbol);
+      const dayRisk = dateRisks[sk];
+      const dayR = dayRisk ? pnl / dayRisk : null;
+      flat.push({ day: d, sortKey: sk, trades: dayTrades, pnl, symbols, count: dayTrades.length, dayR });
+    }
+    // Chunk into weeks of 5, compute weekly totals
+    const rows = [];
+    for (let i = 0; i < flat.length; i += 5) {
+      const week = flat.slice(i, i + 5);
+      while (week.length < 5) week.push(null);
+      const activeDays = week.filter(c => c && c.count > 0);
+      const weekPnl = activeDays.reduce((s, c) => s + c.pnl, 0);
+      // Sum R: only days that have dayR
+      const rDays = activeDays.filter(c => c.dayR != null);
+      const weekR = rDays.length > 0 ? rDays.reduce((s, c) => s + c.dayR, 0) : null;
+      rows.push({ days: week, weekPnl, weekR, hasTrades: activeDays.length > 0 });
+    }
+    return rows;
+  }, [calYear, calMonth, tradesByDate, dateRisks]);
+
+  const prevMonth = () => { if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); } else setCalMonth(m => m - 1); setSelectedDay(null); };
+  const nextMonth = () => { if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); } else setCalMonth(m => m + 1); setSelectedDay(null); };
+  const jumpToTradeMonth = (dir) => {
+    const sorted = uploadedDates.map(d => d.sortKey).sort();
+    if (!sorted.length) return;
+    const target = dir === 'first' ? sorted[0] : sorted[sorted.length - 1];
+    setCalYear(parseInt(target.slice(0, 4))); setCalMonth(parseInt(target.slice(5, 7)) - 1); setSelectedDay(null);
+  };
+
+  const removeDate = (sk) => {
+    setRawTrades(prev => prev.filter(t => t.sortKey !== sk));
+    setUploadedDates(prev => prev.filter(d => d.sortKey !== sk));
+    if (dateMode === 'single' && singleDate === sk) { setDateMode('all'); setSingleDate(''); }
+    if (selectedDay === sk) setSelectedDay(null);
+    setDateRisks(prev => { const u = { ...prev }; delete u[sk]; return u; });
+  };
+
+  const clearAll = () => {
+    setRawTrades([]); setUploadedDates([]); setDateRisks({}); setSelectedIds(new Set());
+    setDateMode('all'); setSingleDate(''); setRangeStart(''); setRangeEnd(''); setSelectedDay(null);
+  };
+
+  const toggleSelect = (id) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selectAll = () => {
+    selectedIds.size === tradesChronological.length ? setSelectedIds(new Set()) : setSelectedIds(new Set(tradesChronological.map(t => t.id)));
+  };
+  const applyRisk = () => {
+    const r = parseFloat(riskInput); if (isNaN(r) || r <= 0) return;
+    const dates = new Set(tradesChronological.filter(t => selectedIds.has(t.id)).map(t => t.sortKey));
+    setDateRisks(prev => { const u = { ...prev }; dates.forEach(d => { u[d] = r; }); return u; });
+    setSelectedIds(new Set()); setRiskInput('');
+  };
+  const clearRisk = () => {
+    const dates = new Set(tradesChronological.filter(t => selectedIds.has(t.id)).map(t => t.sortKey));
+    setDateRisks(prev => { const u = { ...prev }; dates.forEach(d => { delete u[d]; }); return u; });
+    setSelectedIds(new Set());
+  };
+
+  const stats = useMemo(() => {
+    if (!trades.length) return null;
+    const w = trades.filter(t => t.pnl > 0), l = trades.filter(t => t.pnl < 0);
+    const totalPnL = trades.reduce((s, t) => s + t.pnl, 0);
+    const gp = w.reduce((s, t) => s + t.pnl, 0), gl = Math.abs(l.reduce((s, t) => s + t.pnl, 0));
+    let cum = 0, peak = 0, maxDD = 0, cW = 0, cL = 0;
+    const eq = [], cwl = [];
+    trades.forEach((t, i) => {
+      cum += t.pnl; peak = Math.max(peak, cum); maxDD = Math.max(maxDD, peak - cum);
+      eq.push({ trade: i + 1, equity: cum, date: t.dateStr, symbol: t.symbol });
+      if (t.pnl > 0) cW++; else if (t.pnl < 0) cL++;
+      cwl.push({ trade: i + 1, wins: cW, losses: cL, date: t.dateStr, symbol: t.symbol });
+    });
+    let ws = 0, ls = 0, mws = 0, mls = 0;
+    trades.forEach(t => { if (t.pnl > 0) { ws++; ls = 0; mws = Math.max(mws, ws); } else if (t.pnl < 0) { ls++; ws = 0; mls = Math.max(mls, ls); } });
+    return { total: trades.length, wins: w.length, losses: l.length, totalPnL, winRate: (w.length / trades.length) * 100,
+      avgWin: w.length ? gp / w.length : 0, avgLoss: l.length ? gl / l.length : 0, avgTrade: totalPnL / trades.length,
+      profitFactor: gl > 0 ? gp / gl : 0, maxDD, largestWin: w.length ? Math.max(...w.map(t => t.pnl)) : 0,
+      largestLoss: l.length ? Math.min(...l.map(t => t.pnl)) : 0, maxWinStreak: mws, maxLoseStreak: mls,
+      equity: eq, cumWL: cwl, symbols: symbolSummary.length };
+  }, [trades, symbolSummary]);
+
+  const rStats = useMemo(() => {
+    const withRisk = trades.filter(t => dateRisks[t.sortKey] !== undefined);
+    if (!withRisk.length) return null;
+    const rm = withRisk.map(t => ({ ...t, risk: dateRisks[t.sortKey], rMultiple: t.pnl / dateRisks[t.sortKey] }));
+    const totalR = rm.reduce((s, t) => s + t.rMultiple, 0);
+    const w = rm.filter(t => t.rMultiple > 0), l = rm.filter(t => t.rMultiple < 0);
+    let cR = 0, pR = 0, mDR = 0;
+    const rEq = rm.map((t, i) => { cR += t.rMultiple; pR = Math.max(pR, cR); mDR = Math.max(mDR, pR - cR); return { trade: i + 1, r: cR, symbol: t.symbol }; });
+    return { count: withRisk.length, totalR, avgR: totalR / withRisk.length,
+      avgWinR: w.length ? w.reduce((s, t) => s + t.rMultiple, 0) / w.length : 0,
+      avgLossR: l.length ? Math.abs(l.reduce((s, t) => s + t.rMultiple, 0) / l.length) : 0,
+      largestWinR: w.length ? Math.max(...w.map(t => t.rMultiple)) : 0,
+      largestLossR: l.length ? Math.min(...l.map(t => t.rMultiple)) : 0,
+      maxDDR: mDR, rEquity: rEq, rMultiples: rm };
+  }, [trades, dateRisks]);
+
+  const selectedDayTrades = selectedDay ? (tradesByDate[selectedDay] || []) : [];
+  const selectedDayPnL = selectedDayTrades.reduce((s, t) => s + t.pnl, 0);
+  const selectedDayDate = selectedDay ? new Date(selectedDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '';
+
+  // ===== EMPTY STATE =====
+  if (!allTrades.length) {
+    return (
+      <div style={S.root}>
+        <div style={{ ...S.wrap, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '80vh' }}>
+          <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Trading Journal</div>
+          <div style={{ ...S.mid, marginBottom: 24, fontSize: 12 }}>Short selling performance tracker</div>
+          <div style={{ ...S.card, width: '100%', maxWidth: 420, textAlign: 'center' }}>
+            {isProcessing ? (
+              <div>
+                <div style={S.mid}>Processing... {uploadProgress.current}/{uploadProgress.total}</div>
+                <div style={{ background: '#222', borderRadius: 2, height: 4, marginTop: 10 }}>
+                  <div style={{ background: '#22c55e', borderRadius: 2, height: 4, width: `${(uploadProgress.current / uploadProgress.total) * 100}%`, transition: 'width .3s' }} />
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ ...S.mid, marginBottom: 16 }}>Upload trade CSVs to begin</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+                  <label style={{ ...S.btn, display: 'block', padding: 14, cursor: 'pointer', textAlign: 'center' }}>
+                    File<br/><span style={S.dim}>Single CSV</span>
+                    <input type="file" accept=".csv" onChange={handleFileUpload} style={S.hidden} />
+                  </label>
+                  <label style={{ ...S.btn, display: 'block', padding: 14, cursor: 'pointer', textAlign: 'center' }}>
+                    Folder<br/><span style={S.dim}>All CSVs</span>
+                    <input type="file" accept=".csv" multiple webkitdirectory="" onChange={handleFileUpload} style={S.hidden} />
+                  </label>
+                </div>
+                {error && <div style={{ ...S.red, fontSize: 11, marginBottom: 8 }}>{error}</div>}
+                <div style={{ ...S.dim, fontSize: 11, textAlign: 'left' }}>
+                  Filename: 3 numbers M D YY (typos OK)<br/>
+                  Columns: Time, Symbol, Qty, Price, Side (SS/B)
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== MAIN DASHBOARD =====
+  const tabs = ['calendar', 'overview', 'r-multiple', 'trades'];
+
+  return (
+    <div style={S.root}>
+      <div style={S.wrap}>
+
+        {/* Header */}
+        <div style={{ ...S.row, justifyContent: 'space-between', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 600 }}>Trading Journal</div>
+            <div style={{ ...S.dim, fontSize: 11 }}>
+              {uploadedDates.length}d / {symbolSummary.length} sym / {trades.length} trades
+            </div>
+          </div>
+          <div style={{ ...S.row, gap: 4 }}>
+            <label style={{ ...S.btn, cursor: 'pointer' }}>File<input type="file" accept=".csv" onChange={handleFileUpload} style={S.hidden} /></label>
+            <label style={{ ...S.btn, cursor: 'pointer' }}>Folder<input type="file" accept=".csv" multiple webkitdirectory="" onChange={handleFileUpload} style={S.hidden} /></label>
+            {uploadedDates.length > 1 && <button onClick={clearAll} style={S.btnDanger}>Clear</button>}
+          </div>
+        </div>
+
+        {error && <div style={{ ...S.red, fontSize: 11, marginBottom: 8 }}>{error}</div>}
+
+        {/* Date filter */}
+        <div style={{ ...S.row, marginBottom: 10, gap: 6 }}>
+          {[['all', 'All'], ['single', 'Date'], ['range', 'Range']].map(([m, l]) => (
+            <button key={m} onClick={() => { setDateMode(m); if (m === 'all') { setSingleDate(''); setRangeStart(''); setRangeEnd(''); } }}
+              style={dateMode === m ? { ...S.btn, ...S.btnActive } : S.btn}>{l}</button>
+          ))}
+          {dateMode === 'single' && (
+            <select value={singleDate} onChange={e => setSingleDate(e.target.value)} style={S.select}>
+              <option value="">Pick date</option>
+              {uploadedDates.map(d => <option key={d.sortKey} value={d.sortKey}>{d.dateStr}</option>)}
+            </select>
+          )}
+          {dateMode === 'range' && (
+            <>
+              <select value={rangeStart} onChange={e => setRangeStart(e.target.value)} style={S.select}>
+                <option value="">Start</option>
+                {uploadedDates.map(d => <option key={d.sortKey} value={d.sortKey}>{d.dateStr}</option>)}
+              </select>
+              <span style={S.dim}>→</span>
+              <select value={rangeEnd} onChange={e => setRangeEnd(e.target.value)} style={S.select}>
+                <option value="">End</option>
+                {uploadedDates.map(d => <option key={d.sortKey} value={d.sortKey}>{d.dateStr}</option>)}
+              </select>
+            </>
+          )}
+        </div>
+
+        {/* Tabs */}
+        <div style={{ ...S.row, gap: 2, marginBottom: 16, borderBottom: '1px solid #222', paddingBottom: 8 }}>
+          {tabs.map(t => (
+            <button key={t} onClick={() => setActiveTab(t)}
+              style={activeTab === t ? { ...S.btn, ...S.btnActive } : S.btn}>
+              {t === 'r-multiple' ? 'R-Multiple' : t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+
+        {/* ========== CALENDAR TAB ========== */}
+        {activeTab === 'calendar' && (
+          <div>
+            <div style={{ ...S.row, justifyContent: 'space-between', marginBottom: 12 }}>
+              <div style={{ ...S.row, gap: 4 }}>
+                {uploadedDates.length > 0 && <button onClick={() => jumpToTradeMonth('first')} style={{ ...S.btn, fontSize: 11 }}>First</button>}
+                <button onClick={prevMonth} style={S.btn}>‹</button>
+              </div>
+              <div style={{ fontSize: 21, fontWeight: 500 }}>{calMonthName}</div>
+              <div style={{ ...S.row, gap: 4 }}>
+                <button onClick={nextMonth} style={S.btn}>›</button>
+                {uploadedDates.length > 0 && <button onClick={() => jumpToTradeMonth('last')} style={{ ...S.btn, fontSize: 11 }}>Latest</button>}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr) auto', gap: 1, marginBottom: 16 }}>
+              {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Total'].map(d => (
+                <div key={d} style={{ textAlign: 'center', padding: '6px 0', fontSize: 16, color: d === 'Total' ? '#888' : '#555', fontWeight: 500 }}>{d}</div>
+              ))}
+              {calGrid.map((row, ri) => (
+                <React.Fragment key={ri}>
+                  {row.days.map((cell, ci) => {
+                    if (!cell) return <div key={`e${ri}-${ci}`} style={{ background: '#131313', minHeight: 144, borderRadius: 2 }} />;
+                    const has = cell.count > 0;
+                    const isSel = selectedDay === cell.sortKey;
+                    const border = has ? (cell.pnl > 0 ? '#22c55e' : cell.pnl < 0 ? '#ef4444' : '#555') : '#1f1f1f';
+                    return (
+                      <div key={cell.sortKey}
+                        onClick={() => has && setSelectedDay(isSel ? null : cell.sortKey)}
+                        style={{
+                          background: isSel ? '#1a2a1a' : '#151515',
+                          border: `1px solid ${isSel ? '#22c55e' : border}`,
+                          borderRadius: 2, minHeight: 144, padding: 6, cursor: has ? 'pointer' : 'default',
+                          opacity: has ? 1 : 0.5,
+                        }}>
+                        <div style={{ fontSize: 16, color: has ? '#ccc' : '#444', marginBottom: 4 }}>{cell.day}</div>
+                        {has && (
+                          <>
+                            <div style={{ ...pnlColor(cell.pnl), fontSize: 20, fontWeight: 600 }}>{fmt(cell.pnl)}</div>
+                            {cell.dayR != null && (
+                              <div style={{ ...pnlColor(cell.dayR), fontSize: 16, fontWeight: 500, marginTop: 2 }}>{fmtR(cell.dayR)}</div>
+                            )}
+                            <div style={{ fontSize: 14, color: '#666', marginTop: 4 }}>
+                              {cell.symbols.slice(0, 4).join(' ')}
+                              {cell.symbols.length > 4 && ` +${cell.symbols.length - 4}`}
+                            </div>
+                            <div style={{ fontSize: 13, color: '#555', marginTop: 2 }}>{cell.count} trade{cell.count !== 1 ? 's' : ''}</div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {/* Weekly total column */}
+                  <div style={{
+                    background: '#181818', border: '1px solid #222', borderRadius: 2,
+                    minHeight: 144, padding: 6, minWidth: 90,
+                    display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+                    opacity: row.hasTrades ? 1 : 0.3,
+                  }}>
+                    {row.hasTrades && (
+                      <>
+                        <div style={{ ...pnlColor(row.weekPnl), fontSize: 20, fontWeight: 600 }}>{fmt(row.weekPnl)}</div>
+                        {row.weekR != null && (
+                          <div style={{ ...pnlColor(row.weekR), fontSize: 16, fontWeight: 500, marginTop: 4 }}>{fmtR(row.weekR)}</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </React.Fragment>
+              ))}
+            </div>
+
+            {selectedDay && selectedDayTrades.length > 0 && (
+              <div style={{ ...S.card, marginBottom: 16 }}>
+                <div style={{ ...S.row, justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{selectedDayDate}</div>
+                    <div style={{ ...S.dim, fontSize: 11 }}>{selectedDayTrades.length} trade{selectedDayTrades.length !== 1 ? 's' : ''}</div>
+                  </div>
+                  <div style={{ ...pnlColor(selectedDayPnL), fontSize: 16, fontWeight: 600 }}>{fmt(selectedDayPnL)}</div>
+                </div>
+                <table style={S.table}>
+                  <thead>
+                    <tr>
+                      <th style={S.th}>Symbol</th>
+                      <th style={S.thR}>Avg Entry</th>
+                      <th style={S.thR}>Avg Exit</th>
+                      <th style={S.thR}>Qty</th>
+                      <th style={S.thR}>P&L</th>
+                      <th style={S.thR}>Risk</th>
+                      <th style={S.thR}>R</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedDayTrades.map(t => {
+                      const risk = dateRisks[t.sortKey];
+                      const rMul = risk ? t.pnl / risk : null;
+                      return (
+                        <tr key={t.id}>
+                          <td style={S.td}>{t.symbol}{t.executions > 1 ? <span style={{ ...S.dim, fontSize: 10, marginLeft: 4 }}>{t.executions}x</span> : ''}</td>
+                          <td style={S.tdR}>${t.avgEntry.toFixed(2)}</td>
+                          <td style={S.tdR}>${t.avgExit.toFixed(2)}</td>
+                          <td style={S.tdR}>{t.totalQty}</td>
+                          <td style={{ ...S.tdR, ...pnlColor(t.pnl), fontWeight: 500 }}>{fmt(t.pnl)}</td>
+                          <td style={{ ...S.tdR, color: '#666' }}>{risk ? fmt(risk) : '—'}</td>
+                          <td style={{ ...S.tdR, ...pnlColor(rMul || 0), fontWeight: 500 }}>{rMul != null ? fmtR(rMul) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========== OVERVIEW TAB ========== */}
+        {activeTab === 'overview' && stats && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 16 }}>
+              {[
+                ['Total P&L', fmt(stats.totalPnL), pnlColor(stats.totalPnL)],
+                ['Win Rate', stats.winRate.toFixed(1) + '%', stats.winRate >= 50 ? S.green : S.red, `${stats.wins}W / ${stats.losses}L`],
+                ['Profit Factor', stats.profitFactor.toFixed(2), stats.profitFactor >= 1 ? S.green : S.red],
+                ['Avg Trade', fmt(stats.avgTrade), pnlColor(stats.avgTrade)],
+                ['Avg Win', fmt(stats.avgWin), S.green],
+                ['Avg Loss', fmt(stats.avgLoss), S.red],
+                ['Largest Win', fmt(stats.largestWin), S.green],
+                ['Largest Loss', fmt(Math.abs(stats.largestLoss)), S.red],
+                ['Max Drawdown', fmt(stats.maxDD), S.red],
+                ['Total Trades', String(stats.total), {}],
+                ['Streaks', `${stats.maxWinStreak}W / ${stats.maxLoseStreak}L`, {}],
+                ['Symbols', String(stats.symbols), {}],
+              ].map(([label, val, color, sub], i) => (
+                <div key={i} style={S.card}>
+                  <div style={S.label}>{label}</div>
+                  <div style={{ ...S.big, ...color }}>{val}</div>
+                  {sub && <div style={{ ...S.dim, fontSize: 10 }}>{sub}</div>}
+                </div>
+              ))}
+            </div>
+
+            <div style={{ ...S.card, marginBottom: 12 }}>
+              <div style={{ ...S.label, marginBottom: 8 }}>Equity Curve ($)</div>
+              <div style={{ height: 400 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={stats.equity}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                    <XAxis dataKey="trade" stroke="#555" tick={{ fontSize: 10 }} />
+                    <YAxis stroke="#555" tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
+                    <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
+                      formatter={v => [fmt(v), 'Equity']}
+                      labelFormatter={(l, p) => p?.[0]?.payload ? `#${l} ${p[0].payload.symbol} ${p[0].payload.date}` : `#${l}`} />
+                    <Line type="monotone" dataKey="equity" stroke="#22c55e" strokeWidth={1.5} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div style={S.card}>
+              <div style={{ ...S.label, marginBottom: 8 }}>Cumulative Wins & Losses</div>
+              <div style={{ height: 400 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={stats.cumWL}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                    <XAxis dataKey="trade" stroke="#555" tick={{ fontSize: 10 }} />
+                    <YAxis stroke="#555" tick={{ fontSize: 10 }} />
+                    <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
+                      formatter={(v, name) => [v, name === 'wins' ? 'Wins' : 'Losses']}
+                      labelFormatter={(l, p) => p?.[0]?.payload ? `#${l} ${p[0].payload.symbol}` : `#${l}`} />
+                    <Area type="monotone" dataKey="wins" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} />
+                    <Area type="monotone" dataKey="losses" stroke="#ef4444" fill="#ef4444" fillOpacity={0.1} strokeWidth={1.5} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ ...S.row, justifyContent: 'center', gap: 16, marginTop: 6, fontSize: 10, color: '#888' }}>
+                <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#22c55e', marginRight: 4 }} />Wins</span>
+                <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#ef4444', marginRight: 4 }} />Losses</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========== R-MULTIPLE TAB ========== */}
+        {activeTab === 'r-multiple' && (
+          <div>
+            {rStats ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 16 }}>
+                  {[
+                    ['Total R', fmtR(rStats.totalR), pnlColor(rStats.totalR), `${rStats.count} trades`],
+                    ['Avg R', fmtR(rStats.avgR), pnlColor(rStats.avgR)],
+                    ['Avg Win', fmtR(rStats.avgWinR), S.green],
+                    ['Avg Loss', `-${rStats.avgLossR.toFixed(2)}R`, S.red],
+                    ['Largest Win', fmtR(rStats.largestWinR), S.green],
+                    ['Largest Loss', `${rStats.largestLossR.toFixed(2)}R`, S.red],
+                    ['Max DD', `-${rStats.maxDDR.toFixed(2)}R`, S.red],
+                  ].map(([label, val, color, sub], i) => (
+                    <div key={i} style={S.card}>
+                      <div style={S.label}>{label}</div>
+                      <div style={{ ...S.big, ...color }}>{val}</div>
+                      {sub && <div style={{ ...S.dim, fontSize: 10 }}>{sub}</div>}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ ...S.card, marginBottom: 12 }}>
+                  <div style={{ ...S.label, marginBottom: 8 }}>R-Multiple Equity</div>
+                  <div style={{ height: 400 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={rStats.rEquity}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                        <XAxis dataKey="trade" stroke="#555" tick={{ fontSize: 10 }} />
+                        <YAxis stroke="#555" tick={{ fontSize: 10 }} tickFormatter={v => v + 'R'} />
+                        <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
+                          formatter={v => [fmtR(v), 'R']} labelFormatter={l => `Trade ${l}`} />
+                        <Line type="monotone" dataKey="r" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div style={S.card}>
+                  <div style={{ ...S.label, marginBottom: 8 }}>R-Multiple Breakdown</div>
+                  <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+                    <table style={S.table}>
+                      <thead><tr>
+                        <th style={S.th}>Date</th><th style={S.th}>Symbol</th><th style={S.thR}>P&L</th><th style={S.thR}>Risk</th><th style={S.thR}>R</th>
+                      </tr></thead>
+                      <tbody>
+                        {[...rStats.rMultiples].sort((a, b) => b.sortKey.localeCompare(a.sortKey)).map(t => (
+                          <tr key={t.id}>
+                            <td style={{ ...S.td, color: '#888' }}>{t.dateStr}</td>
+                            <td style={S.td}>{t.symbol}</td>
+                            <td style={{ ...S.tdR, ...pnlColor(t.pnl) }}>{fmt(t.pnl)}</td>
+                            <td style={{ ...S.tdR, color: '#666' }}>{fmt(t.risk)}</td>
+                            <td style={{ ...S.tdR, ...pnlColor(t.rMultiple), fontWeight: 500 }}>{fmtR(t.rMultiple)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div style={{ ...S.card, textAlign: 'center', padding: 32 }}>
+                <div style={S.mid}>No symbols with risk defined</div>
+                <div style={{ ...S.dim, fontSize: 11, marginTop: 4 }}>Set risk in the Trades tab</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========== TRADES TAB ========== */}
+        {activeTab === 'trades' && (
+          <div>
+            <div style={{ ...S.row, gap: 6, marginBottom: 10 }}>
+              <span style={S.dim}>{selectedIds.size} selected</span>
+              <span style={S.dim}>$</span>
+              <input type="number" placeholder="Risk" value={riskInput} onChange={e => setRiskInput(e.target.value)} style={{ ...S.input, width: 80 }} />
+              <button onClick={applyRisk} disabled={!selectedIds.size || !riskInput} style={S.btn}>Apply</button>
+              <button onClick={clearRisk} disabled={!selectedIds.size} style={S.btnDanger}>Clear</button>
+              <span style={{ ...S.dim, marginLeft: 'auto', fontSize: 10 }}>{Object.keys(dateRisks).length} date{Object.keys(dateRisks).length !== 1 ? 's' : ''} with risk</span>
+            </div>
+            <div style={{ ...S.card, padding: 0 }}>
+              <div style={{ maxHeight: 500, overflowY: 'auto' }}>
+                <table style={S.table}>
+                  <thead><tr>
+                    <th style={{ ...S.th, width: 30 }}>
+                      <input type="checkbox" checked={selectedIds.size > 0 && selectedIds.size === tradesChronological.length} onChange={selectAll} />
+                    </th>
+                    <th style={S.th}>Date</th>
+                    <th style={S.th}>Symbol</th>
+                    <th style={S.thR}>Qty</th>
+                    <th style={S.thR}>Avg Entry</th>
+                    <th style={S.thR}>Avg Exit</th>
+                    <th style={S.thR}>P&L</th>
+                    <th style={S.thR}>Risk</th>
+                    <th style={S.thR}>R</th>
+                  </tr></thead>
+                  <tbody>
+                    {tradesChronological.map(t => {
+                      const risk = dateRisks[t.sortKey];
+                      const rM = risk ? t.pnl / risk : null;
+                      return (
+                        <tr key={t.id} onClick={() => toggleSelect(t.id)}
+                          style={{ cursor: 'pointer', background: selectedIds.has(t.id) ? '#1a2a1a' : 'transparent' }}>
+                          <td style={S.td} onClick={e => e.stopPropagation()}>
+                            <input type="checkbox" checked={selectedIds.has(t.id)} onChange={() => toggleSelect(t.id)} />
+                          </td>
+                          <td style={{ ...S.td, color: '#888' }}>{t.dateStr}</td>
+                          <td style={{ ...S.td, fontWeight: 500 }}>{t.symbol}{t.executions > 1 ? <span style={{ ...S.dim, fontSize: 10, marginLeft: 4 }}>{t.executions}x</span> : ''}</td>
+                          <td style={{ ...S.tdR, color: '#888' }}>{t.totalQty}</td>
+                          <td style={S.tdR}>${t.avgEntry.toFixed(2)}</td>
+                          <td style={S.tdR}>${t.avgExit.toFixed(2)}</td>
+                          <td style={{ ...S.tdR, ...pnlColor(t.pnl), fontWeight: 500 }}>{fmt(t.pnl)}</td>
+                          <td style={{ ...S.tdR, color: '#666' }}>{risk ? fmt(risk) : '—'}</td>
+                          <td style={{ ...S.tdR, ...pnlColor(rM || 0), fontWeight: 500 }}>{rM != null ? fmtR(rM) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}

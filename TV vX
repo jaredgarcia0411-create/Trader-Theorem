@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import Papa from 'papaparse';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, Cell, ReferenceLine } from 'recharts';
 
 const S = {
   root: { minHeight: '100vh', background: '#111', color: '#e5e5e5', fontFamily: '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif', fontSize: 13, lineHeight: 1.5 },
@@ -50,6 +50,52 @@ export default function TradingJournal() {
   const [calYear, setCalYear] = useState(now.getFullYear());
   const [calMonth, setCalMonth] = useState(now.getMonth());
   const [selectedDay, setSelectedDay] = useState(null);
+
+  // Persistent storage
+  const [storageLoaded, setStorageLoaded] = useState(false);
+  const saveTimer = useRef(null);
+
+  // Load saved data on mount
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const result = await window.storage.get('journal-data');
+        if (result && result.value) {
+          const data = JSON.parse(result.value);
+          if (data.rawTrades?.length) {
+            // Restore Date objects
+            const trades = data.rawTrades.map(t => ({ ...t, date: new Date(t.date) }));
+            setRawTrades(trades);
+          }
+          if (data.dateRisks) setDateRisks(data.dateRisks);
+          if (data.uploadedDates?.length) {
+            const dates = data.uploadedDates.map(d => ({ ...d, date: new Date(d.date) }));
+            setUploadedDates(dates);
+          }
+        }
+      } catch (e) {
+        // No saved data or error — start fresh
+      }
+      setStorageLoaded(true);
+    };
+    load();
+  }, []);
+
+  // Save data whenever trades or risks change (debounced)
+  useEffect(() => {
+    if (!storageLoaded) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await window.storage.set('journal-data', JSON.stringify({
+          rawTrades, dateRisks, uploadedDates
+        }));
+      } catch (e) {
+        // Storage unavailable — silent fail
+      }
+    }, 500);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [rawTrades, dateRisks, uploadedDates, storageLoaded]);
 
   const parsePrice = (val) => {
     if (typeof val === 'number') return val;
@@ -254,9 +300,10 @@ export default function TradingJournal() {
     setDateRisks(prev => { const u = { ...prev }; delete u[sk]; return u; });
   };
 
-  const clearAll = () => {
+  const clearAll = async () => {
     setRawTrades([]); setUploadedDates([]); setDateRisks({}); setSelectedIds(new Set());
     setDateMode('all'); setSingleDate(''); setRangeStart(''); setRangeEnd(''); setSelectedDay(null);
+    try { await window.storage.delete('journal-data'); } catch {}
   };
 
   const toggleSelect = (id) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -280,22 +327,74 @@ export default function TradingJournal() {
     const w = trades.filter(t => t.pnl > 0), l = trades.filter(t => t.pnl < 0);
     const totalPnL = trades.reduce((s, t) => s + t.pnl, 0);
     const gp = w.reduce((s, t) => s + t.pnl, 0), gl = Math.abs(l.reduce((s, t) => s + t.pnl, 0));
-    let cum = 0, peak = 0, maxDD = 0, cW = 0, cL = 0;
-    const eq = [], cwl = [];
-    trades.forEach((t, i) => {
-      cum += t.pnl; peak = Math.max(peak, cum); maxDD = Math.max(maxDD, peak - cum);
-      eq.push({ trade: i + 1, equity: cum, date: t.dateStr, symbol: t.symbol });
-      if (t.pnl > 0) cW++; else if (t.pnl < 0) cL++;
-      cwl.push({ trade: i + 1, wins: cW, losses: cL, date: t.dateStr, symbol: t.symbol });
+
+    // Daily equity curve (aggregate by date)
+    const dayMap = {};
+    trades.forEach(t => {
+      if (!dayMap[t.sortKey]) dayMap[t.sortKey] = { sortKey: t.sortKey, dateStr: t.dateStr, pnl: 0, trades: 0 };
+      dayMap[t.sortKey].pnl += t.pnl;
+      dayMap[t.sortKey].trades++;
     });
+    const dailyArr = Object.values(dayMap).sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    let cum = 0, peak = 0, maxDD = 0;
+    const eq = dailyArr.map((d, i) => {
+      cum += d.pnl; peak = Math.max(peak, cum); maxDD = Math.max(maxDD, peak - cum);
+      return { day: i + 1, equity: cum, date: d.dateStr, pnl: d.pnl, trades: d.trades };
+    });
+
+    // Cumulative W/L (per trade, chronological)
+    let cW = 0, cL = 0;
+    const cwl = trades.map((t, i) => {
+      if (t.pnl > 0) cW++; else if (t.pnl < 0) cL++;
+      return { trade: i + 1, wins: cW, losses: cL, date: t.dateStr, symbol: t.symbol };
+    });
+
     let ws = 0, ls = 0, mws = 0, mls = 0;
     trades.forEach(t => { if (t.pnl > 0) { ws++; ls = 0; mws = Math.max(mws, ws); } else if (t.pnl < 0) { ls++; ws = 0; mls = Math.max(mls, ls); } });
     return { total: trades.length, wins: w.length, losses: l.length, totalPnL, winRate: (w.length / trades.length) * 100,
       avgWin: w.length ? gp / w.length : 0, avgLoss: l.length ? gl / l.length : 0, avgTrade: totalPnL / trades.length,
       profitFactor: gl > 0 ? gp / gl : 0, maxDD, largestWin: w.length ? Math.max(...w.map(t => t.pnl)) : 0,
       largestLoss: l.length ? Math.min(...l.map(t => t.pnl)) : 0, maxWinStreak: mws, maxLoseStreak: mls,
-      equity: eq, cumWL: cwl, symbols: symbolSummary.length };
+      equity: eq, cumWL: cwl, symbols: symbolSummary.length, dayCount: dailyArr.length };
   }, [trades, symbolSummary]);
+
+  // Performance by day of week
+  const perfByDow = useMemo(() => {
+    const days = { Mon: { pnl: 0, count: 0 }, Tue: { pnl: 0, count: 0 }, Wed: { pnl: 0, count: 0 }, Thu: { pnl: 0, count: 0 }, Fri: { pnl: 0, count: 0 } };
+    const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    trades.forEach(t => {
+      const d = new Date(t.sortKey + 'T12:00:00');
+      const name = labels[d.getDay()];
+      if (days[name]) { days[name].pnl += t.pnl; days[name].count++; }
+    });
+    return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map(d => ({ name: d, pnl: days[d].pnl, count: days[d].count }));
+  }, [trades]);
+
+  // Performance by hour of day
+  const perfByHour = useMemo(() => {
+    const hours = {};
+    rawTrades.forEach(t => {
+      if (!t.entryTime) return;
+      // Parse hour from time string (handles "HH:MM:SS", "H:MM:SS AM/PM", etc.)
+      let h = null;
+      const match24 = t.entryTime.match(/^(\d{1,2}):/);
+      if (match24) {
+        h = parseInt(match24[1], 10);
+        // Check for PM
+        if (/PM/i.test(t.entryTime) && h < 12) h += 12;
+        if (/AM/i.test(t.entryTime) && h === 12) h = 0;
+      }
+      if (h == null || h < 0 || h > 23) return;
+      if (!hours[h]) hours[h] = { pnl: 0, count: 0 };
+      hours[h].pnl += t.pnl;
+      hours[h].count++;
+    });
+    // Only return hours that have data, sorted
+    return Object.keys(hours).map(Number).sort((a, b) => a - b).map(h => {
+      const label = h === 0 ? '12AM' : h < 12 ? `${h}AM` : h === 12 ? '12PM' : `${h - 12}PM`;
+      return { name: label, hour: h, pnl: hours[h].pnl, count: hours[h].count };
+    });
+  }, [rawTrades]);
 
   const rStats = useMemo(() => {
     const withRisk = trades.filter(t => dateRisks[t.sortKey] !== undefined);
@@ -316,6 +415,17 @@ export default function TradingJournal() {
   const selectedDayTrades = selectedDay ? (tradesByDate[selectedDay] || []) : [];
   const selectedDayPnL = selectedDayTrades.reduce((s, t) => s + t.pnl, 0);
   const selectedDayDate = selectedDay ? new Date(selectedDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '';
+
+  // ===== LOADING =====
+  if (!storageLoaded) {
+    return (
+      <div style={S.root}>
+        <div style={{ ...S.wrap, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80vh' }}>
+          <div style={S.mid}>Loading saved data...</div>
+        </div>
+      </div>
+    );
+  }
 
   // ===== EMPTY STATE =====
   if (!allTrades.length) {
@@ -532,6 +642,56 @@ export default function TradingJournal() {
                 </table>
               </div>
             )}
+
+            {/* Performance by Day of Week */}
+            {trades.length > 0 && (
+              <div style={{ ...S.card, marginBottom: 12 }}>
+                <div style={{ ...S.label, marginBottom: 8 }}>Performance by Day of Week</div>
+                <div style={{ height: 400 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={perfByDow}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                      <XAxis dataKey="name" stroke="#555" tick={{ fontSize: 12 }} />
+                      <YAxis stroke="#555" tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
+                      <ReferenceLine y={0} stroke="#444" />
+                      <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
+                        formatter={(v) => [fmt(v), 'P&L']}
+                        labelFormatter={(l, p) => p?.[0]?.payload ? `${l} — ${p[0].payload.count} trades` : l} />
+                      <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
+                        {perfByDow.map((d, i) => (
+                          <Cell key={i} fill={d.pnl > 0 ? '#22c55e' : d.pnl < 0 ? '#ef4444' : '#555'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {/* Performance by Time of Day */}
+            {perfByHour.length > 0 && (
+              <div style={{ ...S.card, marginBottom: 12 }}>
+                <div style={{ ...S.label, marginBottom: 8 }}>Performance by Time of Day</div>
+                <div style={{ height: 400 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={perfByHour}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#222" />
+                      <XAxis dataKey="name" stroke="#555" tick={{ fontSize: 11 }} />
+                      <YAxis stroke="#555" tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
+                      <ReferenceLine y={0} stroke="#444" />
+                      <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
+                        formatter={(v) => [fmt(v), 'P&L']}
+                        labelFormatter={(l, p) => p?.[0]?.payload ? `${l} — ${p[0].payload.count} executions` : l} />
+                      <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
+                        {perfByHour.map((d, i) => (
+                          <Cell key={i} fill={d.pnl > 0 ? '#22c55e' : d.pnl < 0 ? '#ef4444' : '#555'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -562,17 +722,17 @@ export default function TradingJournal() {
             </div>
 
             <div style={{ ...S.card, marginBottom: 12 }}>
-              <div style={{ ...S.label, marginBottom: 8 }}>Equity Curve ($)</div>
+              <div style={{ ...S.label, marginBottom: 8 }}>Daily P&L Equity Curve</div>
               <div style={{ height: 400 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={stats.equity}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-                    <XAxis dataKey="trade" stroke="#555" tick={{ fontSize: 10 }} />
+                    <XAxis dataKey="date" stroke="#555" tick={{ fontSize: 10 }} />
                     <YAxis stroke="#555" tick={{ fontSize: 10 }} tickFormatter={v => '$' + v} />
                     <Tooltip contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 3, fontSize: 11 }}
-                      formatter={v => [fmt(v), 'Equity']}
-                      labelFormatter={(l, p) => p?.[0]?.payload ? `#${l} ${p[0].payload.symbol} ${p[0].payload.date}` : `#${l}`} />
-                    <Line type="monotone" dataKey="equity" stroke="#22c55e" strokeWidth={1.5} dot={false} />
+                      formatter={(v, name) => name === 'equity' ? [fmt(v), 'Cumulative'] : [fmt(v), 'Day P&L']}
+                      labelFormatter={(l, p) => p?.[0]?.payload ? `${p[0].payload.date} (${p[0].payload.trades} trades)` : l} />
+                    <Line type="monotone" dataKey="equity" stroke="#22c55e" strokeWidth={1.5} dot={stats.equity.length < 40} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>

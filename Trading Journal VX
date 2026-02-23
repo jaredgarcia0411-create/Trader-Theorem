@@ -321,6 +321,30 @@ export default function TradingJournal() {
     setDateRisks(prev => { const u = { ...prev }; dates.forEach(d => { delete u[d]; }); return u; });
     setSelectedIds(new Set());
   };
+  const deleteTrades = () => {
+    // Get sortKey|symbol keys for selected consolidated trades
+    const idsToDelete = new Set(selectedIds);
+    // Remove matching rawTrades (those whose consolidated id matches)
+    setRawTrades(prev => prev.filter(t => {
+      const consolidatedId = `${t.sortKey}|${t.symbol}`;
+      return !idsToDelete.has(consolidatedId);
+    }));
+    // Clean up dates that no longer have any trades
+    const remainingDates = new Set();
+    rawTrades.forEach(t => {
+      const cid = `${t.sortKey}|${t.symbol}`;
+      if (!idsToDelete.has(cid)) remainingDates.add(t.sortKey);
+    });
+    setUploadedDates(prev => prev.filter(d => remainingDates.has(d.sortKey)));
+    // Clean up dateRisks for dates with no remaining trades
+    setDateRisks(prev => {
+      const u = { ...prev };
+      Object.keys(u).forEach(sk => { if (!remainingDates.has(sk)) delete u[sk]; });
+      return u;
+    });
+    setSelectedIds(new Set());
+    if (selectedDay && !remainingDates.has(selectedDay)) setSelectedDay(null);
+  };
 
   const stats = useMemo(() => {
     if (!trades.length) return null;
@@ -838,7 +862,8 @@ export default function TradingJournal() {
               <span style={S.dim}>$</span>
               <input type="number" placeholder="Risk" value={riskInput} onChange={e => setRiskInput(e.target.value)} style={{ ...S.input, width: 80 }} />
               <button onClick={applyRisk} disabled={!selectedIds.size || !riskInput} style={S.btn}>Apply</button>
-              <button onClick={clearRisk} disabled={!selectedIds.size} style={S.btnDanger}>Clear</button>
+              <button onClick={clearRisk} disabled={!selectedIds.size} style={S.btnDanger}>Clear Risk</button>
+              <button onClick={deleteTrades} disabled={!selectedIds.size} style={{ ...S.btnDanger, borderColor: '#ef4444' }}>Delete</button>
               <span style={{ ...S.dim, marginLeft: 'auto', fontSize: 10 }}>{Object.keys(dateRisks).length} date{Object.keys(dateRisks).length !== 1 ? 's' : ''} with risk</span>
             </div>
             <div style={{ ...S.card, padding: 0 }}>

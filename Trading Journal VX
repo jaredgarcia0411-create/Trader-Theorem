@@ -37,9 +37,16 @@ export default function TradingJournal() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [riskInput, setRiskInput] = useState('');
   const [dateRisks, setDateRisks] = useState({});
+  const [tradeTags, setTradeTags] = useState({});     // tradeId -> [tag1, tag2, ...]
+  const [savedTags, setSavedTags] = useState([]);      // all unique tags for dropdown
   const [uploadedDates, setUploadedDates] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+  const [watchHandle, setWatchHandle] = useState(null);
+  const [importedFiles, setImportedFiles] = useState(new Set());
+  const [isWatching, setIsWatching] = useState(false);
+  const [watchStatus, setWatchStatus] = useState('');
+  const watchTimer = useRef(null);
 
   const [dateMode, setDateMode] = useState('all');
   const [singleDate, setSingleDate] = useState('');
@@ -57,45 +64,94 @@ export default function TradingJournal() {
 
   // Load saved data on mount
   useEffect(() => {
-    const load = async () => {
-      try {
-        const result = await window.storage.get('journal-data');
-        if (result && result.value) {
-          const data = JSON.parse(result.value);
-          if (data.rawTrades?.length) {
-            // Restore Date objects
-            const trades = data.rawTrades.map(t => ({ ...t, date: new Date(t.date) }));
-            setRawTrades(trades);
-          }
-          if (data.dateRisks) setDateRisks(data.dateRisks);
-          if (data.uploadedDates?.length) {
-            const dates = data.uploadedDates.map(d => ({ ...d, date: new Date(d.date) }));
-            setUploadedDates(dates);
-          }
+    try {
+      const raw = localStorage.getItem('journal-data');
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data.rawTrades?.length) {
+          const trades = data.rawTrades.map(t => ({ direction: 'SHORT', ...t, date: new Date(t.date) }));
+          setRawTrades(trades);
         }
-      } catch (e) {
-        // No saved data or error — start fresh
+        if (data.dateRisks) setDateRisks(data.dateRisks);
+        if (data.tradeTags) setTradeTags(data.tradeTags);
+        if (data.savedTags?.length) setSavedTags(data.savedTags);
+        if (data.uploadedDates?.length) {
+          const dates = data.uploadedDates.map(d => ({ ...d, date: new Date(d.date) }));
+          setUploadedDates(dates);
+        }
+        if (data.importedFiles?.length) {
+          setImportedFiles(new Set(data.importedFiles));
+        }
       }
-      setStorageLoaded(true);
-    };
-    load();
+    } catch (e) {}
+    setStorageLoaded(true);
   }, []);
 
   // Save data whenever trades or risks change (debounced)
   useEffect(() => {
     if (!storageLoaded) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
+    saveTimer.current = setTimeout(() => {
       try {
-        await window.storage.set('journal-data', JSON.stringify({
-          rawTrades, dateRisks, uploadedDates
+        localStorage.setItem('journal-data', JSON.stringify({
+          rawTrades, dateRisks, tradeTags, savedTags, uploadedDates,
+          importedFiles: [...importedFiles]
         }));
-      } catch (e) {
-        // Storage unavailable — silent fail
-      }
+      } catch (e) {}
     }, 500);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [rawTrades, dateRisks, uploadedDates, storageLoaded]);
+  }, [rawTrades, dateRisks, tradeTags, savedTags, uploadedDates, importedFiles, storageLoaded]);
+
+  // ===== FOLDER WATCH =====
+  const pickWatchFolder = async () => {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      setWatchHandle(handle);
+      setIsWatching(true);
+      setWatchStatus('Watching...');
+      // Immediately scan once
+      pollFolder(handle);
+    } catch (e) {
+      if (e.name !== 'AbortError') setError('Could not access folder: ' + e.message);
+    }
+  };
+
+  const stopWatching = () => {
+    setIsWatching(false);
+    setWatchHandle(null);
+    setWatchStatus('');
+    if (watchTimer.current) { clearInterval(watchTimer.current); watchTimer.current = null; }
+  };
+
+  const pollFolder = async (handle) => {
+    if (!handle) return;
+    try {
+      const newFiles = [];
+      for await (const entry of handle.values()) {
+        if (entry.kind !== 'file') continue;
+        if (!entry.name.toLowerCase().endsWith('.csv')) continue;
+        if (importedFiles.has(entry.name)) continue;
+        const file = await entry.getFile();
+        newFiles.push(file);
+      }
+      if (newFiles.length > 0) {
+        setWatchStatus(`Found ${newFiles.length} new file(s)...`);
+        await processFiles(newFiles);
+        setWatchStatus('Watching...');
+      }
+    } catch (e) {
+      setWatchStatus('Error: ' + e.message);
+      stopWatching();
+    }
+  };
+
+  // Polling interval
+  useEffect(() => {
+    if (isWatching && watchHandle) {
+      watchTimer.current = setInterval(() => pollFolder(watchHandle), 5000);
+      return () => { if (watchTimer.current) clearInterval(watchTimer.current); };
+    }
+  }, [isWatching, watchHandle, importedFiles, uploadedDates]);
 
   const parsePrice = (val) => {
     if (typeof val === 'number') return val;
@@ -127,14 +183,15 @@ export default function TradingJournal() {
     const csvs = files.filter(f => f.name.toLowerCase().endsWith('.csv'));
     if (!csvs.length) { setError('No CSV files found.'); return; }
     setIsProcessing(true); setUploadProgress({ current: 0, total: csvs.length }); setError('');
-    let ok = 0, skip = 0; const errs = [];
+    let ok = 0, skip = 0; const errs = []; const imported = [];
     for (let i = 0; i < csvs.length; i++) {
       setUploadProgress({ current: i + 1, total: csvs.length });
       const r = await processFile(csvs[i]);
-      if (r.success) ok++;
-      else if (r.skipped) skip++;
+      if (r.success) { ok++; imported.push(csvs[i].name); }
+      else if (r.skipped) { skip++; imported.push(csvs[i].name); }
       else errs.push(`${csvs[i].name}: ${r.error}`);
     }
+    if (imported.length) setImportedFiles(prev => { const next = new Set(prev); imported.forEach(n => next.add(n)); return next; });
     setIsProcessing(false);
     if (errs.length) setError(`OK: ${ok}, Skip: ${skip}, Errors: ${errs.join('; ')}`);
     else if (skip) setError(`Loaded ${ok} file(s). Skipped ${skip}.`);
@@ -156,18 +213,37 @@ export default function TradingJournal() {
             const price = parsePrice(row.Price);
             const time = row.Time || '';
             if (!sym || !side || qty === 0) return;
-            if (!bs[sym]) bs[sym] = { sells: [], buys: [] };
-            if (side === 'SS') bs[sym].sells.push({ qty, price, time });
-            else if (side === 'B') bs[sym].buys.push({ qty, price, time });
+            if (!bs[sym]) bs[sym] = { shortEntry: [], shortExit: [], longEntry: [], longExit: [] };
+            if (side === 'SS') bs[sym].shortEntry.push({ qty, price, time });
+            else if (side === 'B') bs[sym].shortExit.push({ qty, price, time });
+            else if (side === 'MARGIN') bs[sym].longEntry.push({ qty, price, time });
+            else if (side === 'S') bs[sym].longExit.push({ qty, price, time });
           });
           const ct = [];
           Object.entries(bs).forEach(([sym, d]) => {
-            const sells = [...d.sells], buys = [...d.buys];
-            while (sells.length && buys.length) {
-              const s = sells.shift(), b = buys.shift(), q = Math.min(s.qty, b.qty);
-              ct.push({ id: `${di.sortKey}-${sym}-${ct.length}`, symbol: sym, entryPrice: s.price, exitPrice: b.price, qty: q, pnl: (s.price - b.price) * q, entryTime: s.time, exitTime: b.time, date: di.date, dateStr: di.dateStr, sortKey: di.sortKey });
-              if (s.qty > b.qty) sells.unshift({ ...s, qty: s.qty - b.qty });
-              else if (b.qty > s.qty) buys.unshift({ ...b, qty: b.qty - s.qty });
+            // Short trades: SS entry, B exit. P&L = (entry - exit) * qty
+            const se = [...d.shortEntry], sx = [...d.shortExit];
+            while (se.length && sx.length) {
+              const entry = se.shift(), exit = sx.shift(), q = Math.min(entry.qty, exit.qty);
+              ct.push({ id: `${di.sortKey}-${sym}-${ct.length}`, symbol: sym, direction: 'SHORT',
+                entryPrice: entry.price, exitPrice: exit.price, qty: q,
+                pnl: (entry.price - exit.price) * q,
+                entryTime: entry.time, exitTime: exit.time,
+                date: di.date, dateStr: di.dateStr, sortKey: di.sortKey });
+              if (entry.qty > exit.qty) se.unshift({ ...entry, qty: entry.qty - q });
+              else if (exit.qty > entry.qty) sx.unshift({ ...exit, qty: exit.qty - q });
+            }
+            // Long trades: MARGIN entry, S exit. P&L = (exit - entry) * qty
+            const le = [...d.longEntry], lx = [...d.longExit];
+            while (le.length && lx.length) {
+              const entry = le.shift(), exit = lx.shift(), q = Math.min(entry.qty, exit.qty);
+              ct.push({ id: `${di.sortKey}-${sym}-${ct.length}`, symbol: sym, direction: 'LONG',
+                entryPrice: entry.price, exitPrice: exit.price, qty: q,
+                pnl: (exit.price - entry.price) * q,
+                entryTime: entry.time, exitTime: exit.time,
+                date: di.date, dateStr: di.dateStr, sortKey: di.sortKey });
+              if (entry.qty > exit.qty) le.unshift({ ...entry, qty: entry.qty - q });
+              else if (exit.qty > entry.qty) lx.unshift({ ...exit, qty: exit.qty - q });
             }
           });
           if (!ct.length) { resolve({ success: false, error: 'No matched trades' }); return; }
@@ -180,16 +256,17 @@ export default function TradingJournal() {
     });
   });
 
-  // ===== CORE: merge raw executions by symbol+date into single trades =====
+  // ===== CORE: merge raw executions by symbol+date+direction into single trades =====
   const allTrades = useMemo(() => {
     const map = {};
     rawTrades.forEach(t => {
-      const key = `${t.sortKey}|${t.symbol}`;
+      const key = `${t.sortKey}|${t.symbol}|${t.direction}`;
       if (!map[key]) {
         map[key] = {
           id: key, symbol: t.symbol, sortKey: t.sortKey, dateStr: t.dateStr, date: t.date,
+          direction: t.direction,
           pnl: 0, totalQty: 0, executions: 0,
-          entryValue: 0, exitValue: 0, // qty-weighted for avg price
+          entryValue: 0, exitValue: 0,
         };
       }
       map[key].pnl += t.pnl;
@@ -300,10 +377,12 @@ export default function TradingJournal() {
     setDateRisks(prev => { const u = { ...prev }; delete u[sk]; return u; });
   };
 
-  const clearAll = async () => {
+  const clearAll = () => {
     setRawTrades([]); setUploadedDates([]); setDateRisks({}); setSelectedIds(new Set());
+    setTradeTags({}); setSavedTags([]);
     setDateMode('all'); setSingleDate(''); setRangeStart(''); setRangeEnd(''); setSelectedDay(null);
-    try { await window.storage.delete('journal-data'); } catch {}
+    setImportedFiles(new Set()); stopWatching();
+    try { localStorage.removeItem('journal-data'); } catch {}
   };
 
   const toggleSelect = (id) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -322,28 +401,121 @@ export default function TradingJournal() {
     setSelectedIds(new Set());
   };
   const deleteTrades = () => {
-    // Get sortKey|symbol keys for selected consolidated trades
     const idsToDelete = new Set(selectedIds);
-    // Remove matching rawTrades (those whose consolidated id matches)
     setRawTrades(prev => prev.filter(t => {
-      const consolidatedId = `${t.sortKey}|${t.symbol}`;
+      const consolidatedId = `${t.sortKey}|${t.symbol}|${t.direction}`;
       return !idsToDelete.has(consolidatedId);
     }));
-    // Clean up dates that no longer have any trades
     const remainingDates = new Set();
     rawTrades.forEach(t => {
-      const cid = `${t.sortKey}|${t.symbol}`;
+      const cid = `${t.sortKey}|${t.symbol}|${t.direction}`;
       if (!idsToDelete.has(cid)) remainingDates.add(t.sortKey);
     });
     setUploadedDates(prev => prev.filter(d => remainingDates.has(d.sortKey)));
-    // Clean up dateRisks for dates with no remaining trades
     setDateRisks(prev => {
       const u = { ...prev };
       Object.keys(u).forEach(sk => { if (!remainingDates.has(sk)) delete u[sk]; });
       return u;
     });
+    // Clean up tags for deleted trades
+    setTradeTags(prev => {
+      const u = { ...prev };
+      idsToDelete.forEach(id => { delete u[id]; });
+      return u;
+    });
     setSelectedIds(new Set());
     if (selectedDay && !remainingDates.has(selectedDay)) setSelectedDay(null);
+  };
+
+  // ===== TAG MANAGEMENT =====
+  const addTagToTrade = (tradeId, tag) => {
+    const trimmed = tag.trim();
+    if (!trimmed) return;
+    setTradeTags(prev => {
+      const existing = prev[tradeId] || [];
+      if (existing.includes(trimmed)) return prev;
+      return { ...prev, [tradeId]: [...existing, trimmed] };
+    });
+    setSavedTags(prev => prev.includes(trimmed) ? prev : [...prev, trimmed].sort());
+  };
+  const removeTagFromTrade = (tradeId, tag) => {
+    setTradeTags(prev => {
+      const existing = prev[tradeId] || [];
+      const updated = existing.filter(t => t !== tag);
+      if (!updated.length) { const u = { ...prev }; delete u[tradeId]; return u; }
+      return { ...prev, [tradeId]: updated };
+    });
+  };
+
+  // Inline tag editor component
+  const TagCell = ({ tradeId }) => {
+    const [open, setOpen] = useState(false);
+    const [input, setInput] = useState('');
+    const tags = tradeTags[tradeId] || [];
+    const filtered = savedTags.filter(t => !tags.includes(t) && t.toLowerCase().includes(input.toLowerCase()));
+
+    return (
+      <td style={{ ...S.td, position: 'relative', minWidth: 120 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, alignItems: 'center' }}>
+          {tags.map(tag => (
+            <span key={tag} style={{
+              background: '#1a3a1a', border: '1px solid #22c55e33', borderRadius: 3,
+              padding: '1px 6px', fontSize: 10, color: '#22c55e', whiteSpace: 'nowrap',
+              cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3
+            }}>
+              {tag}
+              <span onClick={() => removeTagFromTrade(tradeId, tag)}
+                style={{ color: '#666', fontSize: 10, cursor: 'pointer', lineHeight: 1 }}>×</span>
+            </span>
+          ))}
+          <span onClick={() => setOpen(!open)}
+            style={{ color: '#555', fontSize: 12, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}>+</span>
+        </div>
+        {open && (
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, zIndex: 50,
+            background: '#1a1a1a', border: '1px solid #333', borderRadius: 4,
+            padding: 4, minWidth: 150, boxShadow: '0 4px 12px rgba(0,0,0,.5)'
+          }}>
+            <input
+              autoFocus
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && input.trim()) {
+                  addTagToTrade(tradeId, input);
+                  setInput(''); setOpen(false);
+                }
+                if (e.key === 'Escape') setOpen(false);
+              }}
+              placeholder="Type tag..."
+              style={{ ...S.input, width: '100%', marginBottom: 3, fontSize: 11 }}
+            />
+            {filtered.length > 0 && (
+              <div style={{ maxHeight: 120, overflowY: 'auto' }}>
+                {filtered.map(tag => (
+                  <div key={tag}
+                    onClick={() => { addTagToTrade(tradeId, tag); setInput(''); setOpen(false); }}
+                    style={{
+                      padding: '3px 6px', fontSize: 11, color: '#ccc', cursor: 'pointer',
+                      borderRadius: 2,
+                    }}
+                    onMouseEnter={e => e.target.style.background = '#2a2a2a'}
+                    onMouseLeave={e => e.target.style.background = 'transparent'}
+                  >{tag}</div>
+                ))}
+              </div>
+            )}
+            {input.trim() && !savedTags.includes(input.trim()) && (
+              <div
+                onClick={() => { addTagToTrade(tradeId, input); setInput(''); setOpen(false); }}
+                style={{ padding: '3px 6px', fontSize: 11, color: '#22c55e', cursor: 'pointer', borderTop: '1px solid #333', marginTop: 2 }}
+              >Create "{input.trim()}"</div>
+            )}
+          </div>
+        )}
+      </td>
+    );
   };
 
   const stats = useMemo(() => {
@@ -469,7 +641,7 @@ export default function TradingJournal() {
             ) : (
               <>
                 <div style={{ ...S.mid, marginBottom: 16 }}>Upload trade CSVs to begin</div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 16 }}>
                   <label style={{ ...S.btn, display: 'block', padding: 14, cursor: 'pointer', textAlign: 'center' }}>
                     File<br/><span style={S.dim}>Single CSV</span>
                     <input type="file" accept=".csv" onChange={handleFileUpload} style={S.hidden} />
@@ -478,6 +650,9 @@ export default function TradingJournal() {
                     Folder<br/><span style={S.dim}>All CSVs</span>
                     <input type="file" accept=".csv" multiple webkitdirectory="" onChange={handleFileUpload} style={S.hidden} />
                   </label>
+                  <button onClick={pickWatchFolder} style={{ ...S.btn, display: 'block', padding: 14, textAlign: 'center' }}>
+                    Watch<br/><span style={S.dim}>Auto-import</span>
+                  </button>
                 </div>
                 {error && <div style={{ ...S.red, fontSize: 11, marginBottom: 8 }}>{error}</div>}
                 <div style={{ ...S.dim, fontSize: 11, textAlign: 'left' }}>
@@ -510,7 +685,13 @@ export default function TradingJournal() {
           <div style={{ ...S.row, gap: 4 }}>
             <label style={{ ...S.btn, cursor: 'pointer' }}>File<input type="file" accept=".csv" onChange={handleFileUpload} style={S.hidden} /></label>
             <label style={{ ...S.btn, cursor: 'pointer' }}>Folder<input type="file" accept=".csv" multiple webkitdirectory="" onChange={handleFileUpload} style={S.hidden} /></label>
+            {!isWatching ? (
+              <button onClick={pickWatchFolder} style={S.btn}>Watch</button>
+            ) : (
+              <button onClick={stopWatching} style={{ ...S.btn, borderColor: '#22c55e', color: '#22c55e' }}>Stop</button>
+            )}
             {uploadedDates.length > 1 && <button onClick={clearAll} style={S.btnDanger}>Clear</button>}
+            {watchStatus && <span style={{ fontSize: 10, color: isWatching ? '#22c55e' : '#ef4444', marginLeft: 4 }}>{watchStatus}</span>}
           </div>
         </div>
 
@@ -638,27 +819,41 @@ export default function TradingJournal() {
                   <thead>
                     <tr>
                       <th style={S.th}>Symbol</th>
+                      <th style={S.th}>Side</th>
                       <th style={S.thR}>Avg Entry</th>
                       <th style={S.thR}>Avg Exit</th>
                       <th style={S.thR}>Qty</th>
                       <th style={S.thR}>P&L</th>
                       <th style={S.thR}>Risk</th>
                       <th style={S.thR}>R</th>
+                      <th style={S.th}>Tags</th>
                     </tr>
                   </thead>
                   <tbody>
                     {selectedDayTrades.map(t => {
                       const risk = dateRisks[t.sortKey];
                       const rMul = risk ? t.pnl / risk : null;
+                      const tags = tradeTags[t.id] || [];
                       return (
                         <tr key={t.id}>
                           <td style={S.td}>{t.symbol}{t.executions > 1 ? <span style={{ ...S.dim, fontSize: 10, marginLeft: 4 }}>{t.executions}x</span> : ''}</td>
+                          <td style={{ ...S.td, color: t.direction === 'LONG' ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 500 }}>{t.direction}</td>
                           <td style={S.tdR}>${t.avgEntry.toFixed(2)}</td>
                           <td style={S.tdR}>${t.avgExit.toFixed(2)}</td>
                           <td style={S.tdR}>{t.totalQty}</td>
                           <td style={{ ...S.tdR, ...pnlColor(t.pnl), fontWeight: 500 }}>{fmt(t.pnl)}</td>
                           <td style={{ ...S.tdR, color: '#666' }}>{risk ? fmt(risk) : '—'}</td>
                           <td style={{ ...S.tdR, ...pnlColor(rMul || 0), fontWeight: 500 }}>{rMul != null ? fmtR(rMul) : '—'}</td>
+                          <td style={S.td}>
+                            {tags.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                              {tags.map(tag => (
+                                <span key={tag} style={{
+                                  background: '#1a3a1a', border: '1px solid #22c55e33', borderRadius: 3,
+                                  padding: '1px 6px', fontSize: 10, color: '#22c55e', whiteSpace: 'nowrap'
+                                }}>{tag}</span>
+                              ))}
+                            </div>}
+                          </td>
                         </tr>
                       );
                     })}
@@ -874,6 +1069,7 @@ export default function TradingJournal() {
                       <input type="checkbox" checked={selectedIds.size > 0 && selectedIds.size === tradesChronological.length} onChange={selectAll} />
                     </th>
                     <th style={S.th}>Date</th>
+                    <th style={S.th}>Side</th>
                     <th style={S.th}>Symbol</th>
                     <th style={S.thR}>Qty</th>
                     <th style={S.thR}>Avg Entry</th>
@@ -881,6 +1077,7 @@ export default function TradingJournal() {
                     <th style={S.thR}>P&L</th>
                     <th style={S.thR}>Risk</th>
                     <th style={S.thR}>R</th>
+                    <th style={S.th}>Tags</th>
                   </tr></thead>
                   <tbody>
                     {tradesChronological.map(t => {
@@ -893,6 +1090,7 @@ export default function TradingJournal() {
                             <input type="checkbox" checked={selectedIds.has(t.id)} onChange={() => toggleSelect(t.id)} />
                           </td>
                           <td style={{ ...S.td, color: '#888' }}>{t.dateStr}</td>
+                          <td style={{ ...S.td, color: t.direction === 'LONG' ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 500 }}>{t.direction}</td>
                           <td style={{ ...S.td, fontWeight: 500 }}>{t.symbol}{t.executions > 1 ? <span style={{ ...S.dim, fontSize: 10, marginLeft: 4 }}>{t.executions}x</span> : ''}</td>
                           <td style={{ ...S.tdR, color: '#888' }}>{t.totalQty}</td>
                           <td style={S.tdR}>${t.avgEntry.toFixed(2)}</td>
@@ -900,6 +1098,7 @@ export default function TradingJournal() {
                           <td style={{ ...S.tdR, ...pnlColor(t.pnl), fontWeight: 500 }}>{fmt(t.pnl)}</td>
                           <td style={{ ...S.tdR, color: '#666' }}>{risk ? fmt(risk) : '—'}</td>
                           <td style={{ ...S.tdR, ...pnlColor(rM || 0), fontWeight: 500 }}>{rM != null ? fmtR(rM) : '—'}</td>
+                          <TagCell tradeId={t.id} />
                         </tr>
                       );
                     })}

@@ -1,4 +1,4 @@
-# This is my short selling Trading Journal
+# This is my Short Selling Trading Journal
 - Updating to handle long & short
 - Updating to handle options, futures & crypto
 - Updating to handle broker sync

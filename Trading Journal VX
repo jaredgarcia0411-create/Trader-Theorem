@@ -446,6 +446,23 @@ export default function TradingJournal() {
       return { ...prev, [tradeId]: updated };
     });
   };
+  const deleteSavedTag = (tag) => {
+    setSavedTags(prev => prev.filter(t => t !== tag));
+    // Remove this tag from all trades that have it
+    setTradeTags(prev => {
+      const u = {};
+      Object.entries(prev).forEach(([id, tags]) => {
+        const filtered = tags.filter(t => t !== tag);
+        if (filtered.length) u[id] = filtered;
+      });
+      return u;
+    });
+  };
+
+  // Filter tab state
+  const [filterTags, setFilterTags] = useState(new Set());
+  const [filterStart, setFilterStart] = useState('');
+  const [filterEnd, setFilterEnd] = useState('');
 
   // Inline tag editor component
   const TagCell = ({ tradeId }) => {
@@ -495,14 +512,21 @@ export default function TradingJournal() {
               <div style={{ maxHeight: 120, overflowY: 'auto' }}>
                 {filtered.map(tag => (
                   <div key={tag}
-                    onClick={() => { addTagToTrade(tradeId, tag); setInput(''); setOpen(false); }}
                     style={{
                       padding: '3px 6px', fontSize: 11, color: '#ccc', cursor: 'pointer',
-                      borderRadius: 2,
+                      borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     }}
-                    onMouseEnter={e => e.target.style.background = '#2a2a2a'}
-                    onMouseLeave={e => e.target.style.background = 'transparent'}
-                  >{tag}</div>
+                    onMouseEnter={e => e.currentTarget.style.background = '#2a2a2a'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    <span onClick={() => { addTagToTrade(tradeId, tag); setInput(''); setOpen(false); }}
+                      style={{ flex: 1 }}>{tag}</span>
+                    <span onClick={(e) => { e.stopPropagation(); if (confirm(`Delete tag "${tag}" from all trades?`)) deleteSavedTag(tag); }}
+                      style={{ color: '#666', fontSize: 10, cursor: 'pointer', padding: '0 2px', marginLeft: 6 }}
+                      onMouseEnter={e => e.target.style.color = '#ef4444'}
+                      onMouseLeave={e => e.target.style.color = '#666'}
+                    >×</span>
+                  </div>
                 ))}
               </div>
             )}
@@ -668,7 +692,7 @@ export default function TradingJournal() {
   }
 
   // ===== MAIN DASHBOARD =====
-  const tabs = ['calendar', 'overview', 'r-multiple', 'trades'];
+  const tabs = ['calendar', 'overview', 'r-multiple', 'filter', 'trades'];
 
   return (
     <div style={S.root}>
@@ -1046,6 +1070,218 @@ export default function TradingJournal() {
                 <div style={{ ...S.dim, fontSize: 11, marginTop: 4 }}>Set risk in the Trades tab</div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ========== FILTER TAB ========== */}
+        {activeTab === 'filter' && (
+          <div>
+            {/* Tag selection */}
+            <div style={{ ...S.card, marginBottom: 12 }}>
+              <div style={{ ...S.row, gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                <span style={{ ...S.dim, fontSize: 12 }}>Tags:</span>
+                {savedTags.length === 0 && <span style={{ ...S.dim, fontSize: 11 }}>No tags created yet. Add tags in the Trades tab.</span>}
+                {savedTags.map(tag => {
+                  const active = filterTags.has(tag);
+                  return (
+                    <span key={tag} onClick={() => setFilterTags(prev => {
+                      const n = new Set(prev); n.has(tag) ? n.delete(tag) : n.add(tag); return n;
+                    })}
+                      style={{
+                        background: active ? '#1a3a1a' : '#1a1a1a',
+                        border: `1px solid ${active ? '#22c55e' : '#333'}`,
+                        borderRadius: 4, padding: '3px 10px', fontSize: 11, cursor: 'pointer',
+                        color: active ? '#22c55e' : '#888', fontWeight: active ? 500 : 400,
+                      }}>{tag}</span>
+                  );
+                })}
+                {filterTags.size > 0 && (
+                  <span onClick={() => setFilterTags(new Set())}
+                    style={{ color: '#666', fontSize: 11, cursor: 'pointer', marginLeft: 4 }}>Clear</span>
+                )}
+              </div>
+              <div style={{ ...S.row, gap: 8, alignItems: 'center' }}>
+                <span style={{ ...S.dim, fontSize: 12 }}>Date Range:</span>
+                <input type="date" value={filterStart} onChange={e => setFilterStart(e.target.value)}
+                  style={{ ...S.input, fontSize: 11 }} />
+                <span style={S.dim}>to</span>
+                <input type="date" value={filterEnd} onChange={e => setFilterEnd(e.target.value)}
+                  style={{ ...S.input, fontSize: 11 }} />
+                {(filterStart || filterEnd) && (
+                  <span onClick={() => { setFilterStart(''); setFilterEnd(''); }}
+                    style={{ color: '#666', fontSize: 11, cursor: 'pointer' }}>Clear</span>
+                )}
+              </div>
+            </div>
+
+            {/* Filtered results */}
+            {(() => {
+              // Filter trades by selected tags and date range
+              const filtered = allTrades.filter(t => {
+                if (filterTags.size > 0) {
+                  const tTags = tradeTags[t.id] || [];
+                  if (!Array.from(filterTags).some(ft => tTags.includes(ft))) return false;
+                }
+                if (filterStart && t.sortKey < filterStart) return false;
+                if (filterEnd && t.sortKey > filterEnd) return false;
+                return true;
+              });
+
+              if (filterTags.size === 0) return (
+                <div style={{ ...S.card, textAlign: 'center', padding: 32 }}>
+                  <div style={S.mid}>Select one or more tags above to see performance</div>
+                </div>
+              );
+
+              if (!filtered.length) return (
+                <div style={{ ...S.card, textAlign: 'center', padding: 32 }}>
+                  <div style={S.mid}>No trades match the selected filters</div>
+                </div>
+              );
+
+              const wins = filtered.filter(t => t.pnl > 0);
+              const losses = filtered.filter(t => t.pnl < 0);
+              const totalPnl = filtered.reduce((s, t) => s + t.pnl, 0);
+              const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+              const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+              const winRate = filtered.length > 0 ? (wins.length / filtered.length * 100) : 0;
+              const avgWin = wins.length ? grossProfit / wins.length : 0;
+              const avgLoss = losses.length ? grossLoss / losses.length : 0;
+              const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+
+              // R-multiple stats for filtered trades
+              const rTrades = filtered.filter(t => dateRisks[t.sortKey]);
+              const totalR = rTrades.reduce((s, t) => s + t.pnl / dateRisks[t.sortKey], 0);
+              const rWins = rTrades.filter(t => t.pnl > 0);
+              const rLosses = rTrades.filter(t => t.pnl < 0);
+              const avgRWin = rWins.length ? rWins.reduce((s, t) => s + t.pnl / dateRisks[t.sortKey], 0) / rWins.length : 0;
+              const avgRLoss = rLosses.length ? Math.abs(rLosses.reduce((s, t) => s + t.pnl / dateRisks[t.sortKey], 0)) / rLosses.length : 0;
+
+              // Per-tag breakdown
+              const tagBreakdown = Array.from(filterTags).map(tag => {
+                const tagTrades = filtered.filter(t => (tradeTags[t.id] || []).includes(tag));
+                const tagPnl = tagTrades.reduce((s, t) => s + t.pnl, 0);
+                const tagWins = tagTrades.filter(t => t.pnl > 0);
+                const tagRTrades = tagTrades.filter(t => dateRisks[t.sortKey]);
+                const tagTotalR = tagRTrades.reduce((s, t) => s + t.pnl / dateRisks[t.sortKey], 0);
+                return { tag, count: tagTrades.length, pnl: tagPnl, wins: tagWins.length, winRate: tagTrades.length ? tagWins.length / tagTrades.length * 100 : 0, totalR: tagTotalR, hasRisk: tagRTrades.length > 0 };
+              }).sort((a, b) => b.pnl - a.pnl);
+
+              const Stat = ({ label, value, color }) => (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ color: color || '#ccc', fontSize: 18, fontWeight: 600 }}>{value}</div>
+                  <div style={{ ...S.dim, fontSize: 10, marginTop: 2 }}>{label}</div>
+                </div>
+              );
+
+              return (
+                <div>
+                  {/* Overview metrics */}
+                  <div style={{ ...S.card, marginBottom: 12 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 16 }}>
+                      <Stat label="Net P&L" value={fmt(totalPnl)} color={totalPnl >= 0 ? '#22c55e' : '#ef4444'} />
+                      <Stat label="Trades" value={filtered.length} />
+                      <Stat label="Win Rate" value={`${winRate.toFixed(1)}%`} color={winRate >= 50 ? '#22c55e' : '#ef4444'} />
+                      <Stat label="Avg Win" value={fmt(avgWin)} color="#22c55e" />
+                      <Stat label="Avg Loss" value={fmt(avgLoss)} color="#ef4444" />
+                      <Stat label="Profit Factor" value={profitFactor === Infinity ? '∞' : profitFactor.toFixed(2)} color={profitFactor >= 1 ? '#22c55e' : '#ef4444'} />
+                    </div>
+                  </div>
+
+                  {/* R-Multiple metrics (if any trades have risk) */}
+                  {rTrades.length > 0 && (
+                    <div style={{ ...S.card, marginBottom: 12 }}>
+                      <div style={{ ...S.dim, fontSize: 11, marginBottom: 8 }}>Risk Metrics ({rTrades.length} trades with risk defined)</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 16 }}>
+                        <Stat label="Total R" value={`${totalR >= 0 ? '+' : ''}${totalR.toFixed(2)}R`} color={totalR >= 0 ? '#22c55e' : '#ef4444'} />
+                        <Stat label="Avg R/Trade" value={`${(totalR / rTrades.length).toFixed(2)}R`} color={totalR / rTrades.length >= 0 ? '#22c55e' : '#ef4444'} />
+                        <Stat label="Avg Win R" value={`+${avgRWin.toFixed(2)}R`} color="#22c55e" />
+                        <Stat label="Avg Loss R" value={`-${avgRLoss.toFixed(2)}R`} color="#ef4444" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Per-tag breakdown */}
+                  {tagBreakdown.length > 1 && (
+                    <div style={{ ...S.card, marginBottom: 12 }}>
+                      <div style={{ ...S.dim, fontSize: 11, marginBottom: 8 }}>Breakdown by Tag</div>
+                      <table style={S.table}>
+                        <thead><tr>
+                          <th style={S.th}>Tag</th>
+                          <th style={S.thR}>Trades</th>
+                          <th style={S.thR}>Win Rate</th>
+                          <th style={S.thR}>P&L</th>
+                          <th style={S.thR}>Total R</th>
+                        </tr></thead>
+                        <tbody>
+                          {tagBreakdown.map(tb => (
+                            <tr key={tb.tag}>
+                              <td style={{ ...S.td }}>
+                                <span style={{
+                                  background: '#1a3a1a', border: '1px solid #22c55e33', borderRadius: 3,
+                                  padding: '1px 6px', fontSize: 10, color: '#22c55e'
+                                }}>{tb.tag}</span>
+                              </td>
+                              <td style={S.tdR}>{tb.count}</td>
+                              <td style={{ ...S.tdR, color: tb.winRate >= 50 ? '#22c55e' : '#ef4444' }}>{tb.winRate.toFixed(1)}%</td>
+                              <td style={{ ...S.tdR, ...pnlColor(tb.pnl), fontWeight: 500 }}>{fmt(tb.pnl)}</td>
+                              <td style={{ ...S.tdR, color: tb.hasRisk ? (tb.totalR >= 0 ? '#22c55e' : '#ef4444') : '#666' }}>
+                                {tb.hasRisk ? `${tb.totalR >= 0 ? '+' : ''}${tb.totalR.toFixed(2)}R` : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Individual trades */}
+                  <div style={{ ...S.card, padding: 0 }}>
+                    <div style={{ ...S.dim, fontSize: 11, padding: '8px 10px', borderBottom: '1px solid #222' }}>Matching Trades</div>
+                    <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                      <table style={S.table}>
+                        <thead><tr>
+                          <th style={S.th}>Date</th>
+                          <th style={S.th}>Side</th>
+                          <th style={S.th}>Symbol</th>
+                          <th style={S.thR}>P&L</th>
+                          <th style={S.thR}>R</th>
+                          <th style={S.th}>Tags</th>
+                        </tr></thead>
+                        <tbody>
+                          {filtered.sort((a, b) => a.sortKey.localeCompare(b.sortKey)).map(t => {
+                            const risk = dateRisks[t.sortKey];
+                            const rM = risk ? t.pnl / risk : null;
+                            const tags = tradeTags[t.id] || [];
+                            return (
+                              <tr key={t.id}>
+                                <td style={{ ...S.td, color: '#888' }}>{t.dateStr}</td>
+                                <td style={{ ...S.td, color: t.direction === 'LONG' ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 500 }}>{t.direction}</td>
+                                <td style={{ ...S.td, fontWeight: 500 }}>{t.symbol}</td>
+                                <td style={{ ...S.tdR, ...pnlColor(t.pnl), fontWeight: 500 }}>{fmt(t.pnl)}</td>
+                                <td style={{ ...S.tdR, ...pnlColor(rM || 0), fontWeight: 500 }}>{rM != null ? fmtR(rM) : '—'}</td>
+                                <td style={S.td}>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                                    {tags.map(tag => (
+                                      <span key={tag} style={{
+                                        background: filterTags.has(tag) ? '#1a3a1a' : '#1a1a1a',
+                                        border: `1px solid ${filterTags.has(tag) ? '#22c55e33' : '#33333366'}`,
+                                        borderRadius: 3, padding: '1px 6px', fontSize: 10,
+                                        color: filterTags.has(tag) ? '#22c55e' : '#666'
+                                      }}>{tag}</span>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 

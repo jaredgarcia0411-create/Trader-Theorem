@@ -1,4 +1,4 @@
-# This is my 'Trading Journal' Beta *Trader Theorem*
+# This is my *Trader Theorem* Beta
 ## Started off as a log in lieu of a paid service, but aim now is to have a product for not just logging, but journaling, categorizing, watchlists, backtesting & whatever else I want really.
 ### Future Update List
 - Updating to log options (only handled short sells at first)

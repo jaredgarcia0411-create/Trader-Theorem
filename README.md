@@ -7,7 +7,7 @@
 - Notes on individual trades up to 600 characters & 2 .pdf's.
 - Sync with Google Sheets & Polygon API/or Charles Schwab API to build out 'Backtesting' tab based on hisitorical data as well as context given.
 - Watchlist with defined presets (Hoooooly API's are expensive)
-- Auth0 2.0 compliant as well as API safeguards prior to testing
+- OAuth 2.0 compliant as well as API safeguards prior to testing
 - Agent connected to scrape EDGAR & perform DD on companies that you set a filter on (market cap, key words in X time frame, news events, etc)
 - Comments/Code/Suggestions all welcome
 - Yes this was vibe coded

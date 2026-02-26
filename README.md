@@ -1,12 +1,14 @@
 # This is my *Trader Theorem* Beta
 ## Started off as a log in lieu of a paid service, but aim now is to have a product for not just logging, but journaling, categorizing, watchlists, backtesting & whatever else I want really.
 ### Future Update List
-- Updating to log options (only handled short sells at first)
-- Updating to put notes on individual trades up to 600 characters & 2 .pdf's.
-- Updating to sync with Google Sheets & Polygon API/or Charles Schwab API to build out 'Backtesting' tab based on hisitorical data as well as context given.
-- Updating to build watchlist with defined presets (Hoooooly API's are expensive)
-- Updating to be Auth0 2.0 compliant as well as API safeguards prior to testing
-- Updating to have agent connected to scrape EDGAR & perform DD on companies that you set a filter on (market cap, key words in X time frame, news events, etc)
+- UI/UX to be refined & consistent across all tabs & features.
+- Make the site secure through back end server with 3 legged OAUTH (free with minimal users)
+- Handle logging options (only handled short sells at first)
+- Notes on individual trades up to 600 characters & 2 .pdf's.
+- Sync with Google Sheets & Polygon API/or Charles Schwab API to build out 'Backtesting' tab based on hisitorical data as well as context given.
+- Watchlist with defined presets (Hoooooly API's are expensive)
+- Auth0 2.0 compliant as well as API safeguards prior to testing
+- Agent connected to scrape EDGAR & perform DD on companies that you set a filter on (market cap, key words in X time frame, news events, etc)
 - Comments/Code/Suggestions all welcome
 - Yes this was vibe coded
 - No I don't know how to actually code

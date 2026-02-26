@@ -19,3 +19,4 @@
 - Updated to add custom tags for individual trades. Type it once & will save for future use.
 - Added feature to delete tags, ya know, in case there's a typo (lol)
 - Updated with seperate 'Filter' tab that shows $ & R metrics for any mix of tags you'd like to analyze.
+- Updated to detect & auto load new CSV files based on folder you select the program to 'Watch'. (top right corner)

@@ -3,9 +3,10 @@
 ### Future Update List
 - Updating to log options (only handled short sells at first)
 - Updating to put notes on individual trades up to 600 characters & 2 .pdf's.
-- Updating to sync with Google Sheets & Polygon API to build out 'Backtesting' tab based on hisitorical data as well as context given.
+- Updating to sync with Google Sheets & Polygon API/or Charles Schwab API to build out 'Backtesting' tab based on hisitorical data as well as context given.
 - Updating to build watchlist with defined presets (Hoooooly API's are expensive)
-- Updating with Charles Schwab Market Data API to test with Auth0 2.0 prior to testing Polygon/Massive API
+- Updating to be Auth0 2.0 compliant as well as API safeguards prior to testing
+- Updating to have agent connected to scrape EDGAR & perform DD on companies that you set a filter on (market cap, key words in X time frame, news events, etc)
 - Comments/Code/Suggestions all welcome
 - Yes this was vibe coded
 - No I don't know how to actually code

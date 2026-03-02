@@ -1,4 +1,5 @@
 # This is my *Trader Theorem* Beta
+# Check out  Nexus Terminal for the updated version
 ## Started off as a log in lieu of a paid service, but aim now is to have a product for not just logging, but journaling, categorizing, watchlists, backtesting & whatever else I want really.
 ### Future Update List
 - UI/UX to be refined & consistent across all tabs & features.
